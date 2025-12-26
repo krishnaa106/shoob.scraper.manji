@@ -18,8 +18,8 @@ from pathlib import Path
 
 SCRAPING_CONFIG = {
     # Page range settings
-    "start_page": 1,
-    "end_page": 10,  # Set to None for unlimited scraping
+    "start_page": 2001,
+    "end_page": 2311,  # Set to None for unlimited scraping
     
     # Timing and delays (seconds) - optimized for speed
     "page_delay": 1.5,          # Delay between pages (reduced)
@@ -34,6 +34,7 @@ SCRAPING_CONFIG = {
     "save_mode": "single_file",  # "single_file" or "per_page"
     "pretty_print": True,
     "include_metadata": True,   # Include raw meta tags (like enhanced_scraper)
+    "live_save": True,          # Save after each page (recommended)
     
     # Resume functionality
     "enable_resume": True,
