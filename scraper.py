@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Professional Shoob.gg Card Scraper v2.0
-=======================================
+Advanced Event-Driven Shoob.gg Card Scraper
+===========================================
 
-A robust, professional-grade web scraper for extracting card data from shoob.gg
-with comprehensive data extraction, intelligent error handling, and optimized performance.
+Smart browser-based scraper that waits for actual data loading events
+instead of fixed delays. Event-driven approach for maximum efficiency.
 
 Features:
-- Single-file output with all cards
-- Python-based configuration system
-- Professional logging with minimal noise
-- Resume capability and progress tracking
-- Comprehensive data extraction from individual card pages
-- Anti-detection measures and rate limiting
+- Event-driven waiting (no fixed delays)
+- Smart element detection
+- Adaptive timeouts based on actual loading
+- Maximum efficiency with browser reliability
+- Live-save functionality
+- Resume capability
 
 Author: Senior Developer
-Version: 2.0.0
+Version: 1.0.0-advanced
 """
 
 import asyncio
@@ -31,46 +31,56 @@ from urllib.parse import urljoin
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 
-from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError
 
 # Import configuration
 from config import (
     SCRAPING_CONFIG, BROWSER_CONFIG, URLS, DATA_CONFIG, LOGGING_CONFIG,
-    SELECTORS, ERROR_CONFIG, PERFORMANCE_CONFIG, OUTPUT_DIR, SCRAPER_VERSION
+    SELECTORS, ERROR_CONFIG, PERFORMANCE_CONFIG, OUTPUT_DIR, SCRAPER_VERSION,
+    WAIT_SELECTORS
 )
 
 
-class ShoobCardScraper:
+class AdvancedShoobCardScraper:
     """
-    Professional-grade web scraper for Shoob.gg cards.
+    Advanced event-driven web scraper for Shoob.gg cards.
     
     Features:
-    - Single-file output with comprehensive card data
-    - Python-based configuration system
-    - Professional logging with performance tracking
-    - Resume capability and progress tracking
-    - Anti-detection measures and intelligent rate limiting
-    - Comprehensive data extraction from individual card pages
+    - Event-driven waiting (waits for actual data, not fixed time)
+    - Smart element detection and adaptive timeouts
+    - Maximum efficiency while maintaining browser reliability
+    - Live-save functionality and resume capability
+    - Performance tracking with wait time analytics
     """
     
     def __init__(self):
-        """Initialize the scraper with configuration."""
+        """Initialize the advanced scraper with smart waiting."""
         self.config = SCRAPING_CONFIG
         self.browser_config = BROWSER_CONFIG
         self.urls = URLS
         self.data_config = DATA_CONFIG
         self.selectors = SELECTORS
+        self.wait_selectors = WAIT_SELECTORS
         
         # Initialize data storage
         self.all_cards: List[Dict[str, Any]] = []
         self.scraped_pages: Set[int] = set()
-        self.session_id = f"session_{int(time.time())}"
+        self.failed_card_ids: Set[str] = set()  # Track failed cards for retry
+        self.session_id = f"advanced_session_{int(time.time())}"
         
         # Browser cleanup tracking
         self.browser = None
         self.context = None
         self.page = None
         self.cleanup_done = False
+        
+        # Performance tracking
+        self.wait_times = {
+            "page_loads": [],
+            "card_loads": [],
+            "element_waits": [],
+            "total_saved": 0
+        }
         
         # Setup logging
         self._setup_logging()
@@ -84,25 +94,28 @@ class ShoobCardScraper:
             "errors": 0,
             "consecutive_errors": 0,
             "total_requests": 0,
-            "success_rate": 0.0
+            "success_rate": 0.0,
+            "total_wait_time": 0.0,
+            "average_wait_per_page": 0.0,
+            "average_wait_per_card": 0.0,
         }
         
         # Ensure output directory exists
         OUTPUT_DIR.mkdir(exist_ok=True)
         
-        self.logger.info(f"🚀 Professional Shoob Card Scraper v{SCRAPER_VERSION} initialized")
+        self.logger.info(f"🚀 Advanced Event-Driven Shoob Card Scraper v{SCRAPER_VERSION} initialized")
+        self.logger.info(f"⚡ Smart waiting enabled - no fixed delays!")
         self.logger.info(f"📁 Output directory: {OUTPUT_DIR}")
         
     def _setup_logging(self) -> None:
-        """Setup professional logging configuration."""
-        # Create logger
+        """Setup professional logging configuration with error file logging."""
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(LOGGING_CONFIG["level"])
         
         # Clear existing handlers
         self.logger.handlers.clear()
         
-        # Console handler
+        # Console handler (clean output)
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(LOGGING_CONFIG["level"])
         
@@ -114,22 +127,48 @@ class ShoobCardScraper:
         console_handler.setFormatter(formatter)
         self.logger.addHandler(console_handler)
         
-        # File handler (optional)
-        if LOGGING_CONFIG["log_to_file"]:
-            log_file = Path("logs") / LOGGING_CONFIG["log_file"]
-            log_file.parent.mkdir(exist_ok=True)
+        # File handler for errors only
+        if LOGGING_CONFIG.get("log_to_file", True):
+            log_dir = Path("logs")
+            log_dir.mkdir(exist_ok=True)
+            
+            log_file = log_dir / LOGGING_CONFIG.get("log_file", "scraper_errors.log")
             
             file_handler = RotatingFileHandler(
                 log_file,
-                maxBytes=LOGGING_CONFIG["max_log_size_mb"] * 1024 * 1024,
-                backupCount=LOGGING_CONFIG["backup_count"]
+                maxBytes=LOGGING_CONFIG.get("max_log_size_mb", 10) * 1024 * 1024,
+                backupCount=LOGGING_CONFIG.get("backup_count", 3),
+                encoding='utf-8'  # Use UTF-8 encoding for emoji support
             )
-            file_handler.setLevel(logging.DEBUG)
-            file_handler.setFormatter(formatter)
+            file_handler.setLevel(logging.WARNING)  # Only warnings and errors to file
+            
+            # Detailed formatter for file logging
+            file_formatter = logging.Formatter(
+                "%(asctime)s | %(levelname)-8s | %(funcName)s:%(lineno)d | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S"
+            )
+            file_handler.setFormatter(file_formatter)
             self.logger.addHandler(file_handler)
+            
+            # Create separate file logger for clean console output
+            self._file_logger = logging.getLogger(f"{__name__}_file")
+            self._file_logger.setLevel(logging.WARNING)
+            self._file_logger.handlers.clear()
+            self._file_logger.addHandler(file_handler)
+            self._file_logger.propagate = False
         
         # Prevent propagation to root logger
         self.logger.propagate = False
+    
+    def _log_to_file_only(self, message: str, level: str = "WARNING") -> None:
+        """Log message to file only, not console, to keep progress display clean."""
+        if hasattr(self, '_file_logger'):
+            if level.upper() == "ERROR":
+                self._file_logger.error(message)
+            elif level.upper() == "INFO":
+                self._file_logger.info(message)
+            else:
+                self._file_logger.warning(message)
     
     def _load_progress(self) -> Dict[str, Any]:
         """Load scraping progress from file."""
@@ -149,7 +188,7 @@ class ShoobCardScraper:
             return progress
             
         except Exception as e:
-            self.logger.warning(f"⚠️ Could not load progress file: {e}")
+            self._log_to_file_only(f"Could not load progress file: {e}")
             return {"scraped_pages": [], "total_cards": 0}
     
     def _save_progress(self) -> None:
@@ -165,22 +204,23 @@ class ShoobCardScraper:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "scraped_pages": sorted(list(self.scraped_pages)),
                 "total_cards": len(self.all_cards),
-                "stats": self.stats
+                "stats": self.stats,
+                "wait_times": self.wait_times
             }
             
             with open(progress_file, 'w', encoding='utf-8') as f:
                 json.dump(progress_data, f, indent=2)
                 
         except Exception as e:
-            self.logger.warning(f"⚠️ Could not save progress: {e}")
+            self._log_to_file_only(f"Could not save progress: {e}")
     
     def _save_after_page(self, page_num: int, cards_count: int) -> None:
-        """Save all data after each page (live-save functionality)."""
+        """Save all data after each page."""
         try:
-            # Always save progress tracking
+            # Save progress tracking
             self._save_progress()
             
-            # Save complete data file after each page if live-save is enabled
+            # Save complete data file if live-save is enabled
             if self.config.get("live_save", True):
                 output_file = self._save_final_output()
                 self.logger.info(f"💾 Live-save: Page {page_num} completed ({cards_count} cards) - Total: {len(self.all_cards)} cards")
@@ -188,11 +228,11 @@ class ShoobCardScraper:
                 self.logger.info(f"✅ Page {page_num} completed ({cards_count} cards) - Total: {len(self.all_cards)} cards")
             
         except Exception as e:
-            self.logger.warning(f"⚠️ Could not save after page {page_num}: {e}")
+            self._log_to_file_only(f"Could not save after page {page_num}: {e}")
     
     async def _setup_browser(self) -> tuple[Browser, BrowserContext, Page]:
         """Setup browser with professional anti-detection measures."""
-        self.logger.info("🔧 Setting up browser with anti-detection measures")
+        self.logger.info("🔧 Setting up advanced browser with smart waiting")
         
         playwright = await async_playwright().start()
         
@@ -241,7 +281,7 @@ class ShoobCardScraper:
         return browser, context, page
     
     async def _cleanup_browser(self):
-        """Safely cleanup browser resources with Windows-specific fixes."""
+        """Safely cleanup browser resources."""
         if self.cleanup_done:
             return
             
@@ -251,7 +291,7 @@ class ShoobCardScraper:
             # Close page first
             if self.page and not self.page.is_closed():
                 await self.page.close()
-                await asyncio.sleep(0.1)  # Small delay for cleanup
+                await asyncio.sleep(0.1)
         except Exception:
             pass
         
@@ -259,7 +299,7 @@ class ShoobCardScraper:
             # Close context
             if self.context:
                 await self.context.close()
-                await asyncio.sleep(0.1)  # Small delay for cleanup
+                await asyncio.sleep(0.1)
         except Exception:
             pass
         
@@ -267,7 +307,7 @@ class ShoobCardScraper:
             # Close browser and wait for subprocess cleanup
             if self.browser:
                 await self.browser.close()
-                await asyncio.sleep(0.2)  # Longer delay for browser cleanup
+                await asyncio.sleep(0.2)
         except Exception:
             pass
         
@@ -275,48 +315,149 @@ class ShoobCardScraper:
         try:
             import sys
             if sys.platform == "win32":
-                # Give Windows time to clean up subprocesses
                 await asyncio.sleep(0.3)
         except Exception:
             pass
     
-    def _clean_text(self, text: str) -> str:
-        """Clean and normalize text with configuration options."""
-        if not text:
-            return ""
+    async def _smart_wait_for_element(self, selector: str, timeout: int = None, description: str = "") -> bool:
+        """Smart wait for element with performance tracking."""
+        if timeout is None:
+            timeout = self.config["max_wait_timeout"]
         
-        if not self.data_config["clean_text"]:
-            return text
+        start_time = time.time()
         
-        # Remove extra whitespace and newlines
-        if self.data_config["remove_extra_whitespace"]:
-            cleaned = re.sub(r'\s+', ' ', text.strip())
-            cleaned = re.sub(r'[\r\n\t]', ' ', cleaned)
-            cleaned = re.sub(r'\\n', ' ', cleaned)
-            cleaned = cleaned.strip()
-        else:
-            cleaned = text.strip()
-        
-        return cleaned
+        try:
+            await self.page.wait_for_selector(selector, timeout=timeout)
+            wait_time = time.time() - start_time
+            self.wait_times["element_waits"].append(wait_time)
+            self.stats["total_wait_time"] += wait_time
+            
+            return True
+            
+        except TimeoutError:
+            wait_time = time.time() - start_time
+            # Log timeout to file only (not console to keep progress clean)
+            self._log_to_file_only(f"Timeout after {wait_time:.2f}s waiting for {selector} ({description})")
+            return False
+        except Exception as e:
+            wait_time = time.time() - start_time
+            # Log error to file only (not console to keep progress clean)
+            self._log_to_file_only(f"Error waiting for {selector}: {e}")
+            return False
     
-    async def _get_card_links_from_page(self, page: Page, page_num: int) -> List[str]:
-        """Extract card links from a specific page with retry logic."""
+    async def _smart_wait_for_cards_loaded(self) -> bool:
+        """Wait for cards to be loaded on the page with flexible detection."""
+        # Strategy 1: Wait for at least one card link (quick check)
+        if await self._smart_wait_for_element(
+            self.wait_selectors["cards_container"], 
+            5000,  # Shorter timeout for first card
+            "First card link"
+        ):
+            # Strategy 2: Wait a bit for more cards to load
+            await asyncio.sleep(self.config["network_settle_time"])
+            
+            # Strategy 3: Check how many cards we have
+            try:
+                card_count = await self.page.locator(self.wait_selectors["cards_container"]).count()
+                
+                if card_count >= 5:
+                    # We have a good number of cards, proceed
+                    return True
+                elif card_count > 0:
+                    # We have some cards, wait a bit more for others
+                    await asyncio.sleep(1.0)
+                    
+                    # Check again
+                    final_count = await self.page.locator(self.wait_selectors["cards_container"]).count()
+                    return final_count > 0
+                else:
+                    return False
+                    
+            except Exception as e:
+                return True  # Proceed if we can't count
+        
+        return False
+    
+    async def _smart_wait_for_card_data(self) -> bool:
+        """Wait for card data to be loaded on individual card page with flexible fallbacks."""
+        # Strategy 1: Wait for any meta title (more flexible)
+        meta_loaded = await self._smart_wait_for_element(
+            "meta[property='og:title'], title",
+            5000,  # Shorter timeout for basic elements
+            "Basic card title"
+        )
+        
+        if meta_loaded:
+            # Strategy 2: Small delay for DOM to stabilize, then check for content
+            await asyncio.sleep(self.config["network_settle_time"])
+            
+            # Strategy 3: Verify we have actual content (not just empty tags)
+            try:
+                title_content = await self.page.evaluate("""
+                    () => {
+                        const ogTitle = document.querySelector('meta[property="og:title"]');
+                        const pageTitle = document.querySelector('title');
+                        
+                        const ogContent = ogTitle ? ogTitle.getAttribute('content') : '';
+                        const titleContent = pageTitle ? pageTitle.textContent : '';
+                        
+                        return {
+                            og_title: ogContent,
+                            page_title: titleContent,
+                            has_content: !!(ogContent || titleContent)
+                        };
+                    }
+                """)
+                
+                if title_content.get('has_content'):
+                    return True
+                else:
+                    await asyncio.sleep(1.0)  # Wait a bit more for content to populate
+                    return True  # Proceed anyway, extraction will handle empty content
+            
+            except Exception as e:
+                return True  # Proceed if we can't check content
+        
+        # Strategy 4: Fallback - wait for any page content
+        content_loaded = await self._smart_wait_for_element(
+            "body, main, .container",
+            3000,
+            "Basic page content"
+        )
+        
+        if content_loaded:
+            await asyncio.sleep(self.config["minimal_delay"])
+            return True
+        
+        # Strategy 5: Last resort - if we're here, the page might be loaded but slow
+        return True  # Proceed anyway and let extraction handle what's available
+    
+    async def _get_card_links_from_page(self, page_num: int) -> List[str]:
+        """Extract card links with smart waiting."""
         url = f"{self.urls['base_url']}?page={page_num}"
         
         for attempt in range(self.config["retry_attempts"]):
             try:
                 self.logger.debug(f"🔍 Getting cards from page {page_num} (attempt {attempt + 1})")
                 
-                await page.goto(url, wait_until="networkidle", timeout=self.config["timeout"])
-                await asyncio.sleep(2)  # Wait for dynamic content
+                # Navigate and wait for network to be idle
+                page_start_time = time.time()
+                await self.page.goto(url, wait_until="networkidle", timeout=self.config["page_load_timeout"])
                 
-                # Wait for cards to load
-                await page.wait_for_selector("a[href*='/cards/info/']", timeout=10000)
+                # Smart wait for cards to load
+                cards_loaded = await self._smart_wait_for_cards_loaded()
                 
-                # Extract card links
+                if not cards_loaded:
+                    self._log_to_file_only(f"Cards didn't load properly on page {page_num}")
+                    continue
+                
+                page_load_time = time.time() - page_start_time
+                self.wait_times["page_loads"].append(page_load_time)
+                
+                # Extract card links immediately once loaded
                 card_links = []
                 for selector in self.selectors["card_links"]:
-                    link_elements = await page.locator(selector).all()
+                    link_elements = await self.page.locator(selector).all()
                     
                     for link_element in link_elements:
                         href = await link_element.get_attribute("href")
@@ -329,49 +470,47 @@ class ShoobCardScraper:
                 
                 if unique_links:
                     self.logger.info(f"✅ Page {page_num}: Found {len(unique_links)} cards")
-                    self.stats["consecutive_errors"] = 0  # Reset error counter
+                    self.stats["consecutive_errors"] = 0
                     return unique_links
                 else:
-                    self.logger.warning(f"⚠️ Page {page_num}: No cards found")
+                    self._log_to_file_only(f"Page {page_num}: No cards found")
                     return []
                 
             except Exception as e:
-                self.logger.warning(f"⚠️ Attempt {attempt + 1} failed for page {page_num}: {e}")
+                self._log_to_file_only(f"Attempt {attempt + 1} failed for page {page_num}: {e}")
                 self.stats["errors"] += 1
                 self.stats["consecutive_errors"] += 1
                 
                 if attempt < self.config["retry_attempts"] - 1:
                     await asyncio.sleep(self.config["retry_delay"])
                 else:
-                    self.logger.error(f"❌ Failed to get cards from page {page_num} after all attempts")
+                    self._log_to_file_only(f"Failed to get cards from page {page_num} after all attempts", "ERROR")
                     return []
     
-    async def _extract_card_data(self, page: Page, card_url: str) -> Optional[Dict[str, Any]]:
-        """Extract comprehensive data with optimized speed while maintaining accuracy."""
+    async def _extract_card_data(self, card_url: str) -> Optional[Dict[str, Any]]:
+        """Extract card data with smart waiting and robust error handling."""
         card_id = re.search(r'/cards/info/([a-f0-9]+)', card_url)
         card_id = card_id.group(1) if card_id else "unknown"
         
         for attempt in range(self.config["retry_attempts"]):
             try:
-                await page.goto(card_url, wait_until="networkidle", timeout=self.config["timeout"])
+                # Navigate with smart waiting
+                card_start_time = time.time()
+                await self.page.goto(card_url, wait_until="domcontentloaded", timeout=self.config["page_load_timeout"])
                 
-                # Reduced wait time but still sufficient for accuracy
-                await asyncio.sleep(2)  # Reduced from 5 to 2 seconds
+                # Smart wait for card data to be loaded (more flexible now)
+                data_loaded = await self._smart_wait_for_card_data()
                 
-                # Quick wait for essential elements only
-                try:
-                    await page.wait_for_selector("meta[property='og:title']", timeout=5000)  # Reduced timeout
-                except:
-                    pass  # Continue if not found quickly
+                if not data_loaded:
+                    self._log_to_file_only(f"Card data didn't load properly for {card_id}, but proceeding with extraction")
                 
-                # Extract meta tags first (fastest and most reliable)
-                meta_data = await self._extract_meta_tags(page)
+                card_load_time = time.time() - card_start_time
+                self.wait_times["card_loads"].append(card_load_time)
                 
-                # Get HTML content once and process efficiently
-                html_content = await page.content()
-                main_card_html = await self._validate_main_card_section(html_content, card_id)
+                # Extract meta tags immediately once loaded (or after timeout)
+                meta_data = await self._extract_meta_tags()
                 
-                # Initialize card data
+                # Initialize card data (without load_time)
                 card_data = {
                     "card_id": card_id,
                     "card_url": card_url,
@@ -387,8 +526,8 @@ class ShoobCardScraper:
                 card_data["description"] = self._extract_description_fast(meta_data)
                 card_data["last_updated"] = meta_data.get("meta_property_og:updated_time", "")
                 
-                # Fast tier extraction (optimized)
-                card_data["tier"] = await self._extract_tier_fast(meta_data, main_card_html)
+                # Fast tier extraction
+                card_data["tier"] = await self._extract_tier_fast(meta_data)
                 
                 # Fast image extraction
                 image_urls = self._extract_images_fast(meta_data, card_id)
@@ -401,32 +540,33 @@ class ShoobCardScraper:
                 # Clean up empty fields
                 card_data = {k: v for k, v in card_data.items() if v not in ["", {}, []]}
                 
-                # Quick validation
-                if self._validate_card_data_fast(card_data):
-                    if LOGGING_CONFIG["show_card_details"]:
-                        self.logger.info(f"⚡ Fast extraction: {card_data.get('name', 'Unknown')} (Tier {card_data.get('tier', '?')}) by {card_data.get('creator', 'Unknown')}")
-                    
+                # More lenient validation - accept cards even if some data is missing
+                if card_data.get("card_id") and (card_data.get("name") or card_data.get("image_url")):
                     self.stats["cards_extracted"] += 1
                     self.stats["consecutive_errors"] = 0
                     return card_data
                 else:
-                    return card_data  # Return even incomplete data
+                    # Still return the card data even if validation fails
+                    self._log_to_file_only(f"Card {card_id} has minimal data but including it anyway")
+                    self.stats["cards_extracted"] += 1
+                    return card_data
                     
             except Exception as e:
-                self.logger.warning(f"⚠️ Attempt {attempt + 1} failed for card {card_id}: {e}")
+                self._log_to_file_only(f"Attempt {attempt + 1} failed for card {card_id}: {e}")
                 self.stats["errors"] += 1
                 self.stats["consecutive_errors"] += 1
                 
                 if attempt < self.config["retry_attempts"] - 1:
                     await asyncio.sleep(self.config["retry_delay"])
                 else:
-                    self.logger.error(f"❌ Failed to extract card {card_id} after all attempts")
+                    self._log_to_file_only(f"Failed to extract card {card_id} after all attempts", "ERROR")
+                    self.failed_card_ids.add(card_id)  # Track failed card for potential retry
                     return None
     
-    async def _extract_meta_tags(self, page: Page) -> Dict[str, str]:
+    async def _extract_meta_tags(self) -> Dict[str, str]:
         """Extract meta tags efficiently using JavaScript evaluation."""
         try:
-            meta_data = await page.evaluate("""
+            meta_data = await self.page.evaluate("""
                 () => {
                     const meta = {};
                     
@@ -452,7 +592,7 @@ class ShoobCardScraper:
             return meta_data
             
         except Exception as e:
-            self.logger.warning(f"⚠️ Error extracting meta tags: {e}")
+            self._log_to_file_only(f"Error extracting meta tags: {e}")
             return {}
     
     def _extract_name_fast(self, meta_data: Dict[str, str]) -> str:
@@ -514,8 +654,8 @@ class ShoobCardScraper:
         
         return ""
     
-    async def _extract_tier_fast(self, meta_data: Dict[str, str], html_content: str) -> str:
-        """Fast tier extraction with minimal HTML parsing."""
+    async def _extract_tier_fast(self, meta_data: Dict[str, str]) -> str:
+        """Fast tier extraction using meta tags only."""
         
         # Strategy 1: Extract from image URL (fastest and most reliable)
         og_image = meta_data.get("meta_property_og:image", "")
@@ -526,14 +666,7 @@ class ShoobCardScraper:
                 if tier in ['1', '2', '3', '4', '5', 'S', 's']:
                     return tier.upper() if tier.lower() == 's' else tier
         
-        # Strategy 2: Quick breadcrumb check (limited HTML parsing)
-        breadcrumb_match = re.search(r'category=([0-9S])', html_content[:3000], re.IGNORECASE)
-        if breadcrumb_match:
-            tier = breadcrumb_match.group(1)
-            if tier in ['1', '2', '3', '4', '5', 'S', 's']:
-                return tier.upper() if tier.lower() == 's' else tier
-        
-        # Strategy 3: Meta tags (fallback)
+        # Strategy 2: Meta tags (fallback)
         for meta_text in [meta_data.get("meta_property_og:title", ""), meta_data.get("page_title", "")]:
             if meta_text:
                 tier_match = re.search(r'tier[:\s]*([0-9S]+)', meta_text, re.IGNORECASE)
@@ -571,366 +704,65 @@ class ShoobCardScraper:
             card_data.get("card_id", "") != ""
         )
     
-    async def _extract_tier_info_accurate(self, meta_data: Dict[str, str], html_content: str, card_id: str) -> str:
-        """Extract tier information using the breadcrumb method (most accurate)."""
+    def _clean_text(self, text: str) -> str:
+        """Clean and normalize text with configuration options."""
+        if not text:
+            return ""
         
-        # Strategy 1: Extract from breadcrumb navigation (MOST RELIABLE)
-        # Look for <ol class="breadcrumb-new"> and find category= parameter
-        breadcrumb_pattern = r'<ol[^>]*class="breadcrumb-new"[^>]*>(.*?)</ol>'
-        breadcrumb_match = re.search(breadcrumb_pattern, html_content, re.DOTALL | re.IGNORECASE)
+        if not self.data_config["clean_text"]:
+            return text
         
-        if breadcrumb_match:
-            breadcrumb_content = breadcrumb_match.group(1)
-            # Look for category= in the breadcrumb links
-            category_pattern = r'href="[^"]*[?&]category=([0-9S])[^"]*"'
-            category_match = re.search(category_pattern, breadcrumb_content, re.IGNORECASE)
-            
-            if category_match:
-                tier = category_match.group(1)
-                if tier in ['1', '2', '3', '4', '5', 'S', 's']:
-                    self.logger.debug(f"Found tier {tier} from breadcrumb for card {card_id}")
-                    return tier.upper() if tier.lower() == 's' else tier
+        # Remove extra whitespace and newlines
+        if self.data_config["remove_extra_whitespace"]:
+            cleaned = re.sub(r'\s+', ' ', text.strip())
+            cleaned = re.sub(r'[\r\n\t]', ' ', cleaned)
+            cleaned = re.sub(r'\\n', ' ', cleaned)
+            cleaned = cleaned.strip()
+        else:
+            cleaned = text.strip()
         
-        # Strategy 2: Extract from image URL path (SECOND MOST RELIABLE)
-        og_image = meta_data.get("meta_property_og:image", "")
-        if og_image:
-            # Image URLs contain tier info like /cards/3/ or /cards/4/
-            tier_in_url = re.search(r'/cards/([0-9S])/', og_image, re.IGNORECASE)
-            if tier_in_url:
-                tier = tier_in_url.group(1)
-                if tier in ['1', '2', '3', '4', '5', 'S', 's']:
-                    self.logger.debug(f"Found tier {tier} from image URL for card {card_id}")
-                    return tier.upper() if tier.lower() == 's' else tier
-        
-        # Strategy 3: Look in meta tags (FALLBACK)
-        meta_sources = [
-            meta_data.get("meta_property_og:title", ""),
-            meta_data.get("page_title", ""),
-            meta_data.get("meta_name_description", "")
-        ]
-        
-        tier_patterns = [r'tier[:\s]*([0-9S]+)', r'Tier[:\s]*([0-9S]+)', r'T([0-9S])\b']
-        
-        for meta_text in meta_sources:
-            if not meta_text:
-                continue
-            for pattern in tier_patterns:
-                matches = re.findall(pattern, meta_text, re.IGNORECASE)
-                if matches:
-                    for match in matches:
-                        if match in ['1', '2', '3', '4', '5', 'S', 's']:
-                            self.logger.debug(f"Found tier {match} from meta tags for card {card_id}")
-                            return match.upper() if match.lower() == 's' else match
-        
-        self.logger.warning(f"Could not determine tier for card {card_id}")
-        return "Unknown"
+        return cleaned
     
-    async def _extract_card_image_from_viewer(self, html_content: str, card_id: str) -> Optional[str]:
-        """Extract high-resolution image from the card viewer (most accurate)."""
-        
-        # Look for <div class="cardData"> container (main card viewer)
-        card_data_pattern = r'<div[^>]*class="cardData"[^>]*>(.*?)</div>'
-        card_data_match = re.search(card_data_pattern, html_content, re.DOTALL | re.IGNORECASE)
-        
-        if card_data_match:
-            card_data_content = card_data_match.group(1)
-            
-            # Look for video (animated cards) or img (static cards)
-            # Video first (animated cards)
-            video_pattern = r'<video[^>]*src="([^"]+)"[^>]*>'
-            video_match = re.search(video_pattern, card_data_content, re.IGNORECASE)
-            if video_match:
-                self.logger.debug(f"Found animated card video for {card_id}")
-                return video_match.group(1)
-            
-            # Image (static cards)
-            img_pattern = r'<img[^>]*src="([^"]+)"[^>]*>'
-            img_match = re.search(img_pattern, card_data_content, re.IGNORECASE)
-            if img_match:
-                self.logger.debug(f"Found static card image for {card_id}")
-                return img_match.group(1)
-        
-        return None
-    
-    async def _extract_owner_info(self, html_content: str, card_id: str) -> Dict[str, Any]:
-        """Extract owner and issue information from the correct section."""
-        
-        owner_info = {
-            "issue_number": "",
-            "owners": []
-        }
-        
-        # Look for <div class="padded20 user_purchased"> container
-        owner_pattern = r'<div[^>]*class="padded20 user_purchased"[^>]*>(.*?)</div>'
-        owner_match = re.search(owner_pattern, html_content, re.DOTALL | re.IGNORECASE)
-        
-        if owner_match:
-            owner_content = owner_match.group(1)
-            
-            # Extract issue number from small.blurple2
-            issue_pattern = r'<small[^>]*class="blurple2"[^>]*>Issue #:\s*(\d+)</small>'
-            issue_match = re.search(issue_pattern, owner_content, re.IGNORECASE)
-            if issue_match:
-                owner_info["issue_number"] = issue_match.group(1)
-                self.logger.debug(f"Found issue #{issue_match.group(1)} for card {card_id}")
-            
-            # Extract owner names from profile pictures
-            owner_pattern = r'<img[^>]*(?:alt|title)="([^"]+)"[^>]*>'
-            owner_matches = re.findall(owner_pattern, owner_content, re.IGNORECASE)
-            if owner_matches:
-                owner_info["owners"] = owner_matches[:10]  # Limit to first 10 owners
-                self.logger.debug(f"Found {len(owner_matches)} owners for card {card_id}")
-        
-        return owner_info
-    
-    async def _validate_main_card_section(self, html_content: str, card_id: str) -> str:
-        """Fast validation - just truncate at first related cards section."""
-        # Quick truncation at common related cards patterns
-        for pattern in [r'<h[0-9][^>]*>Cards in this series', r'card-series-container', r'infinitescroll-container']:
-            match = re.search(pattern, html_content, re.IGNORECASE)
-            if match:
-                return html_content[:match.start()]
-        
-        # If no related cards section found, return first 10000 characters (main card area)
-        return html_content[:10000]
-    
-    async def _extract_creator_info_accurate(self, meta_data: Dict[str, str], html_content: str, card_id: str) -> str:
-        """Extract creator information with improved accuracy to avoid cross-contamination."""
-        
-        # Strategy 1: Extract from meta description (most reliable)
-        description = meta_data.get("meta_name_description", "")
-        if description:
-            creator_patterns = [
-                r'Card Maker:\s*([^\n\\]+)',
-                r'Creators:\s*-\s*Card Maker:\s*([^\n\\]+)',
-                r'- Card Maker:\s*([^\n\\]+)'
-            ]
-            
-            for pattern in creator_patterns:
-                match = re.search(pattern, description, re.IGNORECASE)
-                if match:
-                    creator = match.group(1).strip()
-                    creator = re.sub(r'&[^;]+;', '', creator)  # Remove HTML entities
-                    creator = re.sub(r'\\n.*', '', creator)    # Remove anything after newline
-                    return self._clean_text(creator)
-        
-        # Strategy 2: Look in HTML but be more specific
-        if card_id in html_content:
-            # Find the section of HTML around our card ID
-            card_section_match = re.search(f'{card_id}.{{0,1000}}', html_content)
-            if card_section_match:
-                card_section = card_section_match.group(0)
-                creator_patterns = [
-                    r'Card Maker:\s*([^<\n"]+)',
-                    r'Creator:\s*([^<\n"]+)',
-                    r'Made by:\s*([^<\n"]+)'
-                ]
-                
-                for pattern in creator_patterns:
-                    match = re.search(pattern, card_section, re.IGNORECASE)
-                    if match:
-                        creator = match.group(1).strip()
-                        creator = re.sub(r'&[^;]+;', '', creator)
-                        return self._clean_text(creator)
-        
-        return ""
-    
-    async def _extract_description_accurate(self, meta_data: Dict[str, str]) -> str:
-        """Extract description with improved accuracy, prioritizing meta tags."""
-        
-        # Strategy 1: Meta description (most reliable)
-        description = meta_data.get("meta_name_description", "")
-        if description and "Here you can preview" not in description:
-            return self._clean_text(description)
-        
-        # Strategy 2: OpenGraph description
-        og_description = meta_data.get("meta_property_og:description", "")
-        if og_description and og_description != description and "Here you can preview" not in og_description:
-            return self._clean_text(og_description)
-        
-        return ""
-    
-    async def _extract_image_urls_enhanced(self, meta_data: Dict[str, str], card_id: str) -> Dict[str, str]:
-        """Extract various image URLs using enhanced_scraper.py strategy."""
-        
-        image_data = {
-            "image_url": "",
-            "high_res_image_url": "",
-            "twitter_image": "",
-            "og_image": ""
-        }
-        
-        # OpenGraph image (usually high quality)
-        og_image = meta_data.get("meta_property_og:image", "")
-        if og_image:
-            image_data["og_image"] = og_image
-            image_data["high_res_image_url"] = og_image
-            image_data["image_url"] = og_image
-        
-        # Twitter image
-        twitter_image = meta_data.get("meta_name_twitter:image", "")
-        if twitter_image:
-            image_data["twitter_image"] = twitter_image
-            if not image_data["image_url"]:
-                image_data["image_url"] = twitter_image
-        
-        # API endpoint (fallback)
-        if not image_data["image_url"] and card_id:
-            api_url = f"https://api.shoob.gg/site/api/cardr/{card_id}?size=700"
-            image_data["image_url"] = api_url
-        
-        return image_data
-    
-    async def _extract_creator_info_enhanced(self, html_content: str) -> str:
-        """Extract card creator/maker information using enhanced_scraper.py strategy."""
-        
-        creator_patterns = [
-            r'Card Maker:\s*([^\\n<"]+)',
-            r'Creator:\s*([^\\n<"]+)',
-            r'Made by:\s*([^\\n<"]+)',
-            r'Artist:\s*([^\\n<"]+)',
-        ]
-        
-        for pattern in creator_patterns:
-            match = re.search(pattern, html_content, re.IGNORECASE)
-            if match:
-                creator = match.group(1).strip()
-                # Clean up any HTML entities or extra text
-                creator = re.sub(r'&[^;]+;', '', creator)
-                return self._clean_text(creator)
-        
-        return ""
-    
-    async def _extract_date_info_enhanced(self, meta_data: Dict[str, str], html_content: str) -> Dict[str, str]:
-        """Extract date information using enhanced_scraper.py strategy."""
-        
-        date_data = {
-            "creation_date": "",
-            "last_updated": ""
-        }
-        
-        # Last updated from meta
-        updated_time = meta_data.get("meta_property_og:updated_time", "")
-        if updated_time:
-            date_data["last_updated"] = updated_time
-        
-        # Look for creation dates in HTML
-        date_patterns = [
-            r'created[:\s]*(\d{4}-\d{2}-\d{2})',
-            r'date[:\s]*(\d{4}-\d{2}-\d{2})',
-            r'(\d{1,2}/\d{1,2}/\d{4})',
-        ]
-        
-        for pattern in date_patterns:
-            match = re.search(pattern, html_content, re.IGNORECASE)
-            if match:
-                date_data["creation_date"] = match.group(1)
-                break
-        
-        return date_data
-    
-    async def _extract_description_enhanced(self, meta_data: Dict[str, str], html_content: str) -> str:
-        """Extract card description using enhanced_scraper.py strategy."""
-        
-        # Use meta description as primary source
-        description = meta_data.get("meta_name_description", "")
-        if description and description != "Here you can preview given card, see the entire collection and people who own it.":
-            return self._clean_text(description)
-        
-        # Try OpenGraph description
-        og_description = meta_data.get("meta_property_og:description", "")
-        if og_description and og_description != description:
-            return self._clean_text(og_description)
-        
-        return ""
-    
-    async def _extract_additional_metadata_enhanced(self, html_content: str) -> Dict[str, Any]:
-        """Extract additional metadata like rarity, stats, etc. using enhanced_scraper.py strategy."""
-        
-        additional_data = {}
-        
-        # Look for rarity information
-        rarity_patterns = [
-            r'rarity[:\s]*([^\\n<"]+)',
-            r'rare[:\s]*([^\\n<"]+)',
-        ]
-        
-        for pattern in rarity_patterns:
-            match = re.search(pattern, html_content, re.IGNORECASE)
-            if match:
-                additional_data["rarity"] = self._clean_text(match.group(1))
-                break
-        
-        # Look for stats (attack, defense, HP, etc.)
-        stats = {}
-        stat_patterns = [
-            (r'attack[:\s]*(\d+)', 'attack'),
-            (r'defense[:\s]*(\d+)', 'defense'),
-            (r'hp[:\s]*(\d+)', 'hp'),
-            (r'power[:\s]*(\d+)', 'power'),
-        ]
-        
-        for pattern, stat_name in stat_patterns:
-            match = re.search(pattern, html_content, re.IGNORECASE)
-            if match:
-                stats[stat_name] = int(match.group(1))
-        
-        if stats:
-            additional_data["stats"] = stats
-        
-        # Look for tags or categories
-        tag_patterns = [
-            r'tags?[:\s]*\[([^\]]+)\]',
-            r'categories?[:\s]*\[([^\]]+)\]',
-        ]
-        
-        for pattern in tag_patterns:
-            match = re.search(pattern, html_content, re.IGNORECASE)
-            if match:
-                tags = [tag.strip().strip('"\'') for tag in match.group(1).split(',')]
-                additional_data["tags"] = tags
-                break
-        
-        return additional_data
-    
-    def _validate_card_data_enhanced(self, card_data: Dict[str, Any]) -> bool:
-        """Validate if card data is complete enough to be useful using enhanced_scraper.py strategy."""
-        return (
-            card_data.get("name", "") not in ["", "Unknown Card", "Card preview"] and
-            card_data.get("image_url", "") != ""
-        )
-    
-    async def _scrape_page(self, page: Page, page_num: int) -> List[Dict[str, Any]]:
-        """Scrape all cards from a single page."""
-        self.logger.info(f"🚀 Scraping page {page_num}")
+    async def _scrape_page(self, page_num: int) -> List[Dict[str, Any]]:
+        """Scrape all cards from a single page with professional progress indicators."""
         
         try:
-            # Get card links from the page
-            card_links = await self._get_card_links_from_page(page, page_num)
+            # Get card links from the page (with smart waiting)
+            card_links = await self._get_card_links_from_page(page_num)
             
             if not card_links:
-                self.logger.warning(f"⚠️ No cards found on page {page_num}")
+                self._log_to_file_only(f"No cards found on page {page_num}")
                 return []
             
-            # Extract data from each card
+            # Extract data from each card with clean progress indicator
             page_cards = []
+            total_cards = len(card_links)
             
-            for i, card_url in enumerate(card_links):
+            for i, card_url in enumerate(card_links, 1):
                 try:
-                    card_data = await self._extract_card_data(page, card_url)
+                    # Clean progress indicator that updates in place - write to stderr to avoid logger capture
+                    progress_text = f"🔄 Processing cards: [{i}/{total_cards}] ({i/total_cards*100:.0f}%)"
+                    sys.stderr.write(f"\r{progress_text:<60}")
+                    sys.stderr.flush()
+                    
+                    card_data = await self._extract_card_data(card_url)
                     if card_data:
                         page_cards.append(card_data)
                     
-                    # Respectful delay between cards
-                    if i < len(card_links) - 1:
-                        await asyncio.sleep(self.config["card_delay"])
+                    # Minimal delay only if needed for rate limiting
+                    if i < total_cards:
+                        await asyncio.sleep(self.config["minimal_delay"])
                         
                 except Exception as e:
-                    self.logger.error(f"❌ Error processing card {i+1}/{len(card_links)}: {e}")
+                    # Log errors to file only to keep console clean
+                    self._log_to_file_only(f"Error processing card {i}/{total_cards}: {e}", "ERROR")
                     self.stats["errors"] += 1
                     continue
             
-            self.logger.info(f"✅ Page {page_num}: Extracted {len(page_cards)}/{len(card_links)} cards")
+            # Clear progress line and show final result
+            final_text = f"✅ Page {page_num}: Extracted {len(page_cards)}/{total_cards} cards"
+            sys.stderr.write(f"\r{final_text:<60}\n")
+            sys.stderr.flush()
             self.stats["pages_scraped"] += 1
             
             # Add cards to main collection
@@ -943,12 +775,12 @@ class ShoobCardScraper:
             return page_cards
             
         except Exception as e:
-            self.logger.error(f"❌ Error scraping page {page_num}: {e}")
+            self._log_to_file_only(f"Error scraping page {page_num}: {e}", "ERROR")
             self.stats["errors"] += 1
             return []
     
     def _calculate_statistics(self) -> Dict[str, Any]:
-        """Calculate comprehensive scraping statistics."""
+        """Calculate comprehensive scraping statistics with wait time analytics."""
         if self.stats["start_time"]:
             elapsed_time = time.time() - self.stats["start_time"]
             cards_per_second = self.stats["cards_extracted"] / elapsed_time if elapsed_time > 0 else 0
@@ -961,6 +793,11 @@ class ShoobCardScraper:
         total_operations = self.stats["pages_scraped"] + self.stats["errors"]
         success_rate = (self.stats["pages_scraped"] / total_operations * 100) if total_operations > 0 else 0
         
+        # Calculate wait time statistics
+        avg_page_wait = sum(self.wait_times["page_loads"]) / len(self.wait_times["page_loads"]) if self.wait_times["page_loads"] else 0
+        avg_card_wait = sum(self.wait_times["card_loads"]) / len(self.wait_times["card_loads"]) if self.wait_times["card_loads"] else 0
+        total_wait_time = self.stats["total_wait_time"]
+        
         return {
             "session_id": self.session_id,
             "pages_scraped": self.stats["pages_scraped"],
@@ -971,7 +808,13 @@ class ShoobCardScraper:
             "elapsed_time": round(elapsed_time, 2),
             "cards_per_second": round(cards_per_second, 2),
             "pages_per_minute": round(pages_per_minute, 2),
-            "average_cards_per_page": round(self.stats["cards_extracted"] / max(self.stats["pages_scraped"], 1), 1)
+            "average_cards_per_page": round(self.stats["cards_extracted"] / max(self.stats["pages_scraped"], 1), 1),
+            "wait_time_analytics": {
+                "total_wait_time": round(total_wait_time, 2),
+                "average_page_load": round(avg_page_wait, 2),
+                "average_card_load": round(avg_card_wait, 2),
+                "wait_efficiency": round((elapsed_time - total_wait_time) / elapsed_time * 100, 1) if elapsed_time > 0 else 0
+            }
         }
     
     def _save_final_output(self) -> Path:
@@ -987,22 +830,24 @@ class ShoobCardScraper:
                 "scrape_info": {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "scraper_version": SCRAPER_VERSION,
+                    "scraper_type": "advanced_event_driven",
                     "total_cards": len(self.all_cards),
                     "source": self.urls["base_url"],
-                    "method": "comprehensive_individual_card_extraction",
+                    "method": "smart_waiting_browser_automation",
                     "session_statistics": final_stats,
                     "configuration": {
-                        "pages_range": f"{self.config['start_page']}-{self.config.get('end_page', 'auto')}",
-                        "page_delay": self.config["page_delay"],
-                        "card_delay": self.config["card_delay"],
-                        "include_metadata": self.config["include_metadata"],
+                        "pages_range": f"{self.config.get('start_page', 1)}-{self.config.get('end_page', 'auto')}",
+                        "max_wait_timeout": self.config["max_wait_timeout"],
+                        "smart_waiting": True,
+                        "live_save": self.config["live_save"],
                         "resume_enabled": self.config["enable_resume"]
                     },
                     "data_fields": [
                         "card_id", "card_url", "name", "tier", "character_source", 
                         "series", "image_url", "high_res_image_url", "creator", 
                         "card_maker", "description", "last_updated", "extraction_timestamp"
-                    ]
+                    ],
+                    "failed_cards": list(self.failed_card_ids) if self.failed_card_ids else []
                 },
                 "cards": self.all_cards
             }
@@ -1027,16 +872,7 @@ class ShoobCardScraper:
             raise
     
     async def scrape_all_pages(self, start_page: Optional[int] = None, end_page: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Main scraping method with professional error handling and progress tracking.
-        
-        Args:
-            start_page: Starting page number (overrides config)
-            end_page: Ending page number (overrides config)
-            
-        Returns:
-            Dictionary containing comprehensive scraping statistics
-        """
+        """Main scraping method with smart waiting and performance tracking."""
         # Initialize
         self.stats["start_time"] = time.time()
         start_page = start_page or self.config["start_page"]
@@ -1061,15 +897,17 @@ class ShoobCardScraper:
                 else:
                     self.stats["pages_skipped"] += 1
             
-            self.logger.info(f"📊 Scraping Plan:")
+            self.logger.info(f"📊 Smart Scraping Plan:")
             self.logger.info(f"   Pages range: {start_page} to {end_page}")
             self.logger.info(f"   Pages to scrape: {len(pages_to_scrape)}")
             self.logger.info(f"   Pages to skip: {len(self.scraped_pages)}")
+            self.logger.info(f"   Method: Event-driven smart waiting")
+            self.logger.info("-" * 60)
             
             # Check for consecutive errors
             consecutive_error_limit = ERROR_CONFIG["max_consecutive_errors"]
             
-            # Scrape pages
+            # Scrape pages with smart waiting
             for page_num in pages_to_scrape:
                 try:
                     # Check consecutive error limit
@@ -1077,20 +915,23 @@ class ShoobCardScraper:
                         self.logger.error(f"❌ Too many consecutive errors ({consecutive_error_limit}), stopping")
                         break
                     
-                    # Scrape the page
-                    await self._scrape_page(self.page, page_num)
+                    # Log which page we're scraping
+                    self.logger.info(f"🚀 Scraping page {page_num}")
+                    
+                    # Scrape the page with smart waiting
+                    await self._scrape_page(page_num)
                     
                     # Progress update
                     if LOGGING_CONFIG["show_progress"]:
                         progress = (len(self.scraped_pages) / len(pages_to_scrape)) * 100
                         self.logger.info(f"📈 Progress: {progress:.1f}% ({len(self.scraped_pages)}/{len(pages_to_scrape)} pages)")
                     
-                    # Respectful delay between pages
+                    # Minimal delay between pages (only for rate limiting)
                     if page_num < max(pages_to_scrape):
-                        await asyncio.sleep(self.config["page_delay"])
+                        await asyncio.sleep(self.config["minimal_delay"])
                     
                 except Exception as e:
-                    self.logger.error(f"❌ Critical error processing page {page_num}: {e}")
+                    self._log_to_file_only(f"Critical error processing page {page_num}: {e}", "ERROR")
                     self.stats["errors"] += 1
                     self.stats["consecutive_errors"] += 1
                     
@@ -1100,11 +941,16 @@ class ShoobCardScraper:
                     else:
                         break
             
+            # Retry failed cards if any
+            if self.failed_card_ids and len(self.failed_card_ids) <= 10:  # Only retry if reasonable number
+                self.logger.info(f"🔄 Retrying {len(self.failed_card_ids)} failed cards...")
+                await self._retry_failed_cards()
+            
             # Calculate and display final statistics
             final_stats = self._calculate_statistics()
             
             if LOGGING_CONFIG["show_statistics"]:
-                self.logger.info("🎉 Scraping completed!")
+                self.logger.info("🎉 Smart scraping completed!")
                 self.logger.info(f"📊 Final Statistics:")
                 self.logger.info(f"   Pages scraped: {final_stats['pages_scraped']}")
                 self.logger.info(f"   Pages skipped: {final_stats['pages_skipped']}")
@@ -1113,6 +959,17 @@ class ShoobCardScraper:
                 self.logger.info(f"   Total time: {final_stats['elapsed_time']}s")
                 self.logger.info(f"   Speed: {final_stats['cards_per_second']} cards/sec")
                 self.logger.info(f"   Average: {final_stats['average_cards_per_page']} cards/page")
+                
+                if self.failed_card_ids:
+                    self.logger.warning(f"   Failed cards: {len(self.failed_card_ids)}")
+                
+                # Show wait time analytics
+                wait_analytics = final_stats["wait_time_analytics"]
+                self.logger.info(f"⏱️ Wait Time Analytics:")
+                self.logger.info(f"   Total wait time: {wait_analytics['total_wait_time']}s")
+                self.logger.info(f"   Avg page load: {wait_analytics['average_page_load']}s")
+                self.logger.info(f"   Avg card load: {wait_analytics['average_card_load']}s")
+                self.logger.info(f"   Wait efficiency: {wait_analytics['wait_efficiency']}%")
             
             # Save final output
             if self.all_cards:
@@ -1140,7 +997,8 @@ class ShoobCardScraper:
             "scraped_pages": sorted(list(self.scraped_pages)),
             "output_file": str(output_file) if output_file.exists() else None,
             "session_id": self.session_id,
-            "last_updated": datetime.now(timezone.utc).isoformat()
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "scraper_type": "advanced_event_driven"
         }
         
         # Add file info if exists
@@ -1162,6 +1020,41 @@ class ShoobCardScraper:
                     ]
                     
             except Exception as e:
-                self.logger.warning(f"⚠️ Error getting file info: {e}")
+                self._log_to_file_only(f"Error getting file info: {e}")
         
         return summary
+    
+    async def _retry_failed_cards(self) -> None:
+        """Retry extraction for failed cards."""
+        if not self.failed_card_ids:
+            return
+        
+        failed_list = list(self.failed_card_ids)
+        retry_success = 0
+        
+        for i, card_id in enumerate(failed_list, 1):
+            try:
+                progress_text = f"🔄 Retrying failed cards: [{i}/{len(failed_list)}] ({i/len(failed_list)*100:.0f}%)"
+                sys.stderr.write(f"\r{progress_text:<60}")
+                sys.stderr.flush()
+                
+                card_url = f"{self.urls['site_url']}/cards/info/{card_id}"
+                card_data = await self._extract_card_data(card_url)
+                
+                if card_data:
+                    self.all_cards.append(card_data)
+                    self.failed_card_ids.remove(card_id)
+                    retry_success += 1
+                
+                await asyncio.sleep(self.config["minimal_delay"])
+                
+            except Exception as e:
+                self._log_to_file_only(f"Retry failed for card {card_id}: {e}", "ERROR")
+        
+        # Clear progress line and show result
+        if retry_success > 0:
+            final_text = f"🔄 Retry completed: {retry_success}/{len(failed_list)} cards recovered"
+        else:
+            final_text = f"🔄 Retry completed: No additional cards recovered"
+        sys.stderr.write(f"\r{final_text:<60}\n")
+        sys.stderr.flush()
