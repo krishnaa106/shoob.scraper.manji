@@ -44,7 +44,7 @@ shoob/
 ### Basic Usage
 
 ```bash
-# Scrape with default settings (pages 1-10)
+# Scrape with default settings (pages 1-10) - Clean output with no warnings
 python main.py
 
 # Scrape specific page range
