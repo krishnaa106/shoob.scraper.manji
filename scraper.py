@@ -24,6 +24,7 @@ import logging
 import re
 import time
 import sys
+import signal
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
 from urllib.parse import urljoin
@@ -64,6 +65,12 @@ class ShoobCardScraper:
         self.all_cards: List[Dict[str, Any]] = []
         self.scraped_pages: Set[int] = set()
         self.session_id = f"session_{int(time.time())}"
+        
+        # Browser cleanup tracking
+        self.browser = None
+        self.context = None
+        self.page = None
+        self.cleanup_done = False
         
         # Setup logging
         self._setup_logging()
@@ -167,6 +174,22 @@ class ShoobCardScraper:
         except Exception as e:
             self.logger.warning(f"⚠️ Could not save progress: {e}")
     
+    def _save_after_page(self, page_num: int, cards_count: int) -> None:
+        """Save all data after each page (live-save functionality)."""
+        try:
+            # Always save progress tracking
+            self._save_progress()
+            
+            # Save complete data file after each page if live-save is enabled
+            if self.config.get("live_save", True):
+                output_file = self._save_final_output()
+                self.logger.info(f"💾 Live-save: Page {page_num} completed ({cards_count} cards) - Total: {len(self.all_cards)} cards")
+            else:
+                self.logger.info(f"✅ Page {page_num} completed ({cards_count} cards) - Total: {len(self.all_cards)} cards")
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ Could not save after page {page_num}: {e}")
+    
     async def _setup_browser(self) -> tuple[Browser, BrowserContext, Page]:
         """Setup browser with professional anti-detection measures."""
         self.logger.info("🔧 Setting up browser with anti-detection measures")
@@ -216,6 +239,46 @@ class ShoobCardScraper:
         await page.set_extra_http_headers(self.browser_config["extra_headers"])
         
         return browser, context, page
+    
+    async def _cleanup_browser(self):
+        """Safely cleanup browser resources with Windows-specific fixes."""
+        if self.cleanup_done:
+            return
+            
+        self.cleanup_done = True
+        
+        try:
+            # Close page first
+            if self.page and not self.page.is_closed():
+                await self.page.close()
+                await asyncio.sleep(0.1)  # Small delay for cleanup
+        except Exception:
+            pass
+        
+        try:
+            # Close context
+            if self.context:
+                await self.context.close()
+                await asyncio.sleep(0.1)  # Small delay for cleanup
+        except Exception:
+            pass
+        
+        try:
+            # Close browser and wait for subprocess cleanup
+            if self.browser:
+                await self.browser.close()
+                await asyncio.sleep(0.2)  # Longer delay for browser cleanup
+        except Exception:
+            pass
+        
+        # Additional cleanup for Windows
+        try:
+            import sys
+            if sys.platform == "win32":
+                # Give Windows time to clean up subprocesses
+                await asyncio.sleep(0.3)
+        except Exception:
+            pass
     
     def _clean_text(self, text: str) -> str:
         """Clean and normalize text with configuration options."""
@@ -874,8 +937,8 @@ class ShoobCardScraper:
             self.all_cards.extend(page_cards)
             self.scraped_pages.add(page_num)
             
-            # Save progress periodically
-            self._save_progress()
+            # Save after each page (live-save functionality)
+            self._save_after_page(page_num, len(page_cards))
             
             return page_cards
             
@@ -983,7 +1046,7 @@ class ShoobCardScraper:
         self._load_progress()
         
         # Setup browser
-        browser, context, page = await self._setup_browser()
+        self.browser, self.context, self.page = await self._setup_browser()
         
         try:
             # Determine pages to scrape
@@ -1015,7 +1078,7 @@ class ShoobCardScraper:
                         break
                     
                     # Scrape the page
-                    await self._scrape_page(page, page_num)
+                    await self._scrape_page(self.page, page_num)
                     
                     # Progress update
                     if LOGGING_CONFIG["show_progress"]:
@@ -1065,8 +1128,8 @@ class ShoobCardScraper:
             raise
             
         finally:
-            await context.close()
-            await browser.close()
+            # Proper cleanup to prevent errors on exit
+            await self._cleanup_browser()
     
     def get_scraped_data_summary(self) -> Dict[str, Any]:
         """Get a summary of scraped data."""
