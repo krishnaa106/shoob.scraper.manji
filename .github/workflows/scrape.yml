@@ -10,7 +10,7 @@ on:
       end:
         description: "End page"
         required: true
-        default: "300"
+        default: "100"
 
 jobs:
   scrape:
