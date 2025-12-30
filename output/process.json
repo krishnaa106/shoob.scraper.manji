@@ -1900,27 +1900,38 @@
     2297,
     2298,
     2299,
-    2300
+    2300,
+    2301,
+    2302,
+    2303,
+    2304,
+    2305,
+    2306,
+    2307,
+    2308,
+    2309,
+    2310,
+    2311
   ],
-  "last_updated": "2025-12-30T17:40:50.419977+00:00",
-  "total_cards": 3000,
+  "last_updated": "2025-12-30T18:32:42.569284+00:00",
+  "total_cards": 157,
   "scraper_version": "1.0.0-advanced",
   "session_statistics": {
-    "session_id": "advanced_session_1767097414",
-    "pages_scraped": 200,
+    "session_id": "advanced_session_1767118693",
+    "pages_scraped": 11,
     "pages_skipped": 0,
-    "cards_extracted": 3000,
+    "cards_extracted": 157,
     "total_errors": 0,
     "success_rate": 100.0,
-    "elapsed_time": 19035.64,
-    "cards_per_second": 0.16,
-    "pages_per_minute": 0.63,
-    "average_cards_per_page": 15.0,
+    "elapsed_time": 869.55,
+    "cards_per_second": 0.18,
+    "pages_per_minute": 0.76,
+    "average_cards_per_page": 14.3,
     "wait_time_analytics": {
-      "total_wait_time": 63.66,
-      "average_page_load": 2.28,
-      "average_card_load": 6.08,
-      "wait_efficiency": 99.7
+      "total_wait_time": 9.12,
+      "average_page_load": 2.09,
+      "average_card_load": 5.28,
+      "wait_efficiency": 99.0
     }
   }
 }
